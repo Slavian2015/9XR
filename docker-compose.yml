@@ -1,0 +1,23 @@
+version: "3.8"
+
+services:
+  spherical-monitor:
+    build: .
+    container_name: spherical-monitor
+    environment:
+      - VIRT_W=5120
+      - VIRT_H=1440
+      # VNC/noVNC ports (noVNC stays exposed via 6080->NOVNC_PORT)
+      - VNC_PORT=5900
+      - NOVNC_PORT=6080
+      # Security:
+      # Set password to enable VNC authentication (recommended).
+      # - VNC_PASSWORD=change-me
+      # Restrict VNC server to localhost (websockify still works).
+      - VNC_LOCALHOST_ONLY=1
+      # Можно задать тут сразу окно:
+      # - TARGET_WINDOW_NAME=Calculator
+      # или
+      # - TARGET_WINDOW_ID=0x4600007
+    ports:
+      - "6080:6080"
