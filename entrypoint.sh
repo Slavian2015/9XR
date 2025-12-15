@@ -78,6 +78,9 @@ wait_for_x "${VIEW_DISPLAY_NUM}" || {
 }
 
 DISPLAY="${SOURCE_DISPLAY_NUM}" openbox &
+DISPLAY=$SOURCE_DISPLAY_NUM xeyes &
+DISPLAY=$SOURCE_DISPLAY_NUM xclock &
+DISPLAY=$SOURCE_DISPLAY_NUM glxgears &
 OPENBOX_PID=$!
 
 # Optional: set a wallpaper (panorama) on the root window.
