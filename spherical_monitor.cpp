@@ -104,10 +104,17 @@ struct WindowCapture {
     bool     loggedFirstCapture = false;
 
     bool init() {
-        display = XOpenDisplay(nullptr);
+        // Capture source X server can be different from render X server (GLFW uses DISPLAY).
+        // If CAPTURE_DISPLAY is set (e.g. ":0"), we capture from that display.
+        const char* captureDisplayName = std::getenv("CAPTURE_DISPLAY");
+        display = XOpenDisplay((captureDisplayName && std::strlen(captureDisplayName) > 0) ? captureDisplayName : nullptr);
         if (!display) {
             std::cerr << "Failed to open X display\n";
             return false;
+        }
+
+        if (captureDisplayName && std::strlen(captureDisplayName) > 0) {
+            std::cerr << "Capturing from X display: " << captureDisplayName << "\n";
         }
 
         window = getTargetWindow(display);

@@ -15,7 +15,8 @@ docker compose up -d --build
 - `VIRT_W`, `VIRT_H` — размер виртуального экрана Xvfb (по умолчанию 5120x1440)
 - `SOURCE_DISPLAY_NUM` — дисплей с рабочим столом/приложениями (по умолчанию `:0`)
 - `VIEW_DISPLAY_NUM` — дисплей с `spherical_monitor` (по умолчанию `:1`)
-- `SPHERICAL_FULLSCREEN` — `1` (по умолчанию) = fullscreen, `0` = окно 1280x720
+- `VIEW_W`, `VIEW_H` — размер VIEW-дисплея (по умолчанию 1280x720)
+- `CAPTURE_DISPLAY` — X11-дисплей, откуда `spherical_monitor` делает захват (по умолчанию = `SOURCE_DISPLAY_NUM`)
 - `CAPTURE_FPS` — ограничение FPS захвата X11 (0/не задано = каждый кадр)
 - `PANORAMA_PATH` — путь к equirectangular-панораме (PNG/JPG). Если задано, ставится как обои рабочего стола (фон), и попадает на сферу вместе с окнами приложений (например: `/assets/castle.png`).
 - `VNC_PORT` (по умолчанию 5900), `NOVNC_PORT` (по умолчанию 6080)
@@ -29,6 +30,7 @@ docker compose up -d --build
 ```bash
 docker exec -e DISPLAY=:0 spherical-monitor xclock
 docker exec -e DISPLAY=:0 spherical-monitor xeyes
+docker exec -e DISPLAY=:0 spherical-monitor glxgears
 ```
 
 Если ты поменял `SOURCE_DISPLAY_NUM`, подставь его значение вместо `:0`.

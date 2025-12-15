@@ -7,6 +7,15 @@ services:
     environment:
       - VIRT_W=5120
       - VIRT_H=1440
+      # Two Xvfb displays:
+      # - SOURCE (:0 by default) is the big desktop where apps run
+      # - VIEW (:1 by default) is the small desktop shown via noVNC
+      - SOURCE_DISPLAY_NUM=:0
+      - VIEW_DISPLAY_NUM=:1
+      - VIEW_W=1280
+      - VIEW_H=720
+      # spherical_monitor captures from SOURCE; override if you change SOURCE_DISPLAY_NUM
+      - CAPTURE_DISPLAY=:0
       # If set, uses this equirectangular panorama image as X11 wallpaper (background).
       - PANORAMA_PATH=/assets/castle_anime_2.png
       # VNC/noVNC ports (noVNC stays exposed via 6080->NOVNC_PORT)
