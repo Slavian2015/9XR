@@ -7,6 +7,8 @@ services:
     environment:
       - VIRT_W=5120
       - VIRT_H=1440
+      # If set, uses this equirectangular panorama image as X11 wallpaper (background).
+      - PANORAMA_PATH=/assets/castle_anime_2.png
       # VNC/noVNC ports (noVNC stays exposed via 6080->NOVNC_PORT)
       - VNC_PORT=5900
       - NOVNC_PORT=6080
@@ -21,3 +23,5 @@ services:
       # - TARGET_WINDOW_ID=0x4600007
     ports:
       - "6080:6080"
+    volumes:
+      - ./assets:/assets

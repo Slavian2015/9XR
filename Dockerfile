@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y \
     xvfb \
     x11vnc \
     openbox \
+    feh \
     tini \
     git \
     python3 \

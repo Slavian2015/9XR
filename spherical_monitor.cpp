@@ -16,7 +16,7 @@
 float g_yawDeg   = 0.0f;   // вращение вокруг Y
 float g_pitchDeg = 0.0f;   // вращение вокруг X
 
-const float ROT_SPEED = 0.5f;   // скорость поворота стрелками
+const float ROT_SPEED = 2.0f;   // скорость поворота стрелками
 
 // ---------- вспомогательные функции X11 ----------
 
@@ -348,10 +348,10 @@ void drawTexturedSphere(float radius, int rings, int sectors) {
             float z2 = radius * std::cos(theta2) * std::sin(phi);
 
             float u1 = phi / (2.0f * PI);
-            float v1_tex = (theta1 + PI/2.0f) / PI;
+            float v1_tex = 1.0f - ((theta1 + PI/2.0f) / PI);
 
             float u2 = phi / (2.0f * PI);
-            float v2_tex = (theta2 + PI/2.0f) / PI;
+            float v2_tex = 1.0f - ((theta2 + PI/2.0f) / PI);
 
             glTexCoord2f(u1, v1_tex);
             glVertex3f(x1, y1, z1);
@@ -397,10 +397,10 @@ int main() {
 
         // управление камерой стрелками
         if (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS) {
-            g_yawDeg -= ROT_SPEED;
+            g_yawDeg += ROT_SPEED;
         }
         if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS) {
-            g_yawDeg += ROT_SPEED;
+            g_yawDeg -= ROT_SPEED;
         }
         if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS) {
             g_pitchDeg += ROT_SPEED;

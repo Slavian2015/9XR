@@ -58,9 +58,20 @@ xdpyinfo -display "${DISPLAY}" >/dev/null 2>&1 || {
 openbox &
 OPENBOX_PID=$!
 
-# Make the root desktop non-black by default (helps visually confirm capture/rotation).
-if command -v xsetroot >/dev/null 2>&1; then
-	xsetroot -solid "#404040" || true
+# Optional: set a wallpaper (panorama) on the root window.
+# This keeps apps like xclock visible, while giving the sphere a panoramic background.
+PANORAMA_PATH=${PANORAMA_PATH:-}
+if [[ -n "${PANORAMA_PATH}" ]]; then
+	if [[ -f "${PANORAMA_PATH}" ]]; then
+		if command -v feh >/dev/null 2>&1; then
+			feh --no-fehbg --bg-fill "${PANORAMA_PATH}" || true
+			echo "Wallpaper set from PANORAMA_PATH=${PANORAMA_PATH}"
+		else
+			echo "PANORAMA_PATH is set but 'feh' is not installed" >&2
+		fi
+	else
+		echo "PANORAMA_PATH file not found: ${PANORAMA_PATH}" >&2
+	fi
 fi
 
 X11VNC_ARGS=( -display "${DISPLAY}" -forever -shared -rfbport "${VNC_PORT}" )
