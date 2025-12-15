@@ -11,12 +11,55 @@
 #include <cstring>
 #include <chrono>
 #include <vector>
+#include <algorithm>
 
 // ---------- глобальное состояние камеры ----------
 float g_yawDeg   = 0.0f;   // вращение вокруг Y
 float g_pitchDeg = 0.0f;   // вращение вокруг X
 
 const float ROT_SPEED = 2.0f;   // скорость поворота стрелками
+
+// Sphere radius used both for rendering and mouse-ray mapping.
+static constexpr float SPHERE_RADIUS = 5.0f;
+
+static bool isSphereMouseEnabled() {
+    const char* v = std::getenv("SPHERE_MOUSE");
+    if (!v || std::strlen(v) == 0) return true;
+    return std::atoi(v) != 0;
+}
+
+struct WindowCapture;
+
+struct Vec3 {
+    float x;
+    float y;
+    float z;
+};
+
+static Vec3 normalize(Vec3 v) {
+    float len = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+    if (len <= 0.0f) return {0.0f, 0.0f, -1.0f};
+    return {v.x / len, v.y / len, v.z / len};
+}
+
+static Vec3 rotateX(Vec3 v, float deg) {
+    float a = deg * 3.14159265358979323846f / 180.0f;
+    float c = std::cos(a);
+    float s = std::sin(a);
+    return {v.x, c * v.y - s * v.z, s * v.y + c * v.z};
+}
+
+static Vec3 rotateY(Vec3 v, float deg) {
+    float a = deg * 3.14159265358979323846f / 180.0f;
+    float c = std::cos(a);
+    float s = std::sin(a);
+    return {c * v.x + s * v.z, v.y, -s * v.x + c * v.z};
+}
+
+static bool viewMouseToCaptureXY(GLFWwindow* glfwWindow, const WindowCapture& cap, double xpos, double ypos, int& outX, int& outY);
+static bool captureLocalToRoot(const WindowCapture& cap, int local_x, int local_y, int& root_x, int& root_y);
+static void injectMouseMove(WindowCapture& cap, int local_x, int local_y);
+static void injectMouseButton(WindowCapture& cap, int button, bool down);
 
 // ---------- вспомогательные функции X11 ----------
 
@@ -294,6 +337,80 @@ struct WindowCapture {
     }
 };
 
+static bool viewMouseToCaptureXY(GLFWwindow* glfwWindow, const WindowCapture& cap, double xpos, double ypos, int& outX, int& outY) {
+    if (cap.width <= 0 || cap.height <= 0) return false;
+
+    int winW = 0, winH = 0;
+    int fbW = 0, fbH = 0;
+    glfwGetWindowSize(glfwWindow, &winW, &winH);
+    glfwGetFramebufferSize(glfwWindow, &fbW, &fbH);
+    if (fbW <= 0 || fbH <= 0 || winW <= 0 || winH <= 0) return false;
+
+    // Convert window coords -> framebuffer coords (HiDPI-safe).
+    double sx = static_cast<double>(fbW) / static_cast<double>(winW);
+    double sy = static_cast<double>(fbH) / static_cast<double>(winH);
+    double mx = xpos * sx;
+    double my = ypos * sy;
+
+    // Normalized device coordinates.
+    float ndcX = static_cast<float>((2.0 * (mx + 0.5) / static_cast<double>(fbW)) - 1.0);
+    float ndcY = static_cast<float>(1.0 - (2.0 * (my + 0.5) / static_cast<double>(fbH)));
+
+    // Reconstruct a view ray in camera space for the same projection used in rendering.
+    float aspect = static_cast<float>(fbW) / static_cast<float>(fbH);
+    float tanHalfFovY = std::tan(90.0f * 0.5f * 3.14159265358979323846f / 180.0f);
+    Vec3 dirCam = normalize({ndcX * tanHalfFovY * aspect, ndcY * tanHalfFovY, -1.0f});
+
+    // Convert camera-space ray to world-space direction in the sphere's model coordinates.
+    Vec3 dirWorld = rotateY(rotateX(dirCam, g_pitchDeg), g_yawDeg);
+    dirWorld = normalize(dirWorld);
+
+    // Convert direction to spherical UV used by drawTexturedSphere().
+    float y = std::clamp(dirWorld.y, -1.0f, 1.0f);
+    float theta = std::asin(y); // [-pi/2, pi/2]
+
+    float phi = std::atan2(dirWorld.z, dirWorld.x); // [-pi, pi]
+    if (phi < 0.0f) {
+        phi += 2.0f * 3.14159265358979323846f;
+    }
+
+    float u = phi / (2.0f * 3.14159265358979323846f); // [0,1)
+    float v = 1.0f - ((theta + 3.14159265358979323846f / 2.0f) / 3.14159265358979323846f);
+
+    int cx = static_cast<int>(u * static_cast<float>(cap.width));
+    int cy = static_cast<int>(v * static_cast<float>(cap.height));
+    cx = std::clamp(cx, 0, std::max(0, cap.width - 1));
+    cy = std::clamp(cy, 0, std::max(0, cap.height - 1));
+
+    outX = cx;
+    outY = cy;
+    return true;
+}
+
+static bool captureLocalToRoot(const WindowCapture& cap, int local_x, int local_y, int& root_x, int& root_y) {
+    if (!cap.display || !cap.window) return false;
+    Window root = DefaultRootWindow(cap.display);
+    Window child = 0;
+    if (!XTranslateCoordinates(cap.display, cap.window, root, local_x, local_y, &root_x, &root_y, &child)) {
+        return false;
+    }
+    return true;
+}
+
+static void injectMouseMove(WindowCapture& cap, int local_x, int local_y) {
+    int root_x = 0, root_y = 0;
+    if (!captureLocalToRoot(cap, local_x, local_y, root_x, root_y)) return;
+    int screen = DefaultScreen(cap.display);
+    XTestFakeMotionEvent(cap.display, screen, root_x, root_y, CurrentTime);
+    XFlush(cap.display);
+}
+
+static void injectMouseButton(WindowCapture& cap, int button, bool down) {
+    if (!cap.display) return;
+    XTestFakeButtonEvent(cap.display, button, down ? True : False, CurrentTime);
+    XFlush(cap.display);
+}
+
 // ---------- отправка клика в окно (по центру) ----------
 
 void sendCenterClick(WindowCapture& cap) {
@@ -370,6 +487,58 @@ void drawTexturedSphere(float radius, int rings, int sectors) {
     }
 }
 
+static double g_lastCursorX = 0.0;
+static double g_lastCursorY = 0.0;
+static bool g_leftMouseDown = false;
+
+static void onCursorPos(GLFWwindow* w, double xpos, double ypos) {
+    g_lastCursorX = xpos;
+    g_lastCursorY = ypos;
+
+    if (!isSphereMouseEnabled()) return;
+    if (!g_leftMouseDown) return;
+
+    auto* cap = static_cast<WindowCapture*>(glfwGetWindowUserPointer(w));
+    if (!cap) return;
+
+    int cx = 0, cy = 0;
+    if (!viewMouseToCaptureXY(w, *cap, xpos, ypos, cx, cy)) return;
+    injectMouseMove(*cap, cx, cy);
+}
+
+static void onMouseButton(GLFWwindow* w, int button, int action, int /*mods*/) {
+    if (!isSphereMouseEnabled()) return;
+
+    if (button != GLFW_MOUSE_BUTTON_LEFT) return;
+
+    auto* cap = static_cast<WindowCapture*>(glfwGetWindowUserPointer(w));
+    if (!cap) return;
+
+    double xpos = 0.0, ypos = 0.0;
+    glfwGetCursorPos(w, &xpos, &ypos);
+    g_lastCursorX = xpos;
+    g_lastCursorY = ypos;
+
+    int cx = 0, cy = 0;
+    if (!viewMouseToCaptureXY(w, *cap, xpos, ypos, cx, cy)) {
+        // Still update button state to avoid getting stuck.
+        if (action == GLFW_PRESS) g_leftMouseDown = true;
+        if (action == GLFW_RELEASE) g_leftMouseDown = false;
+        return;
+    }
+
+    // Move pointer to the mapped location before clicking.
+    injectMouseMove(*cap, cx, cy);
+
+    if (action == GLFW_PRESS) {
+        g_leftMouseDown = true;
+        injectMouseButton(*cap, 1, true);
+    } else if (action == GLFW_RELEASE) {
+        g_leftMouseDown = false;
+        injectMouseButton(*cap, 1, false);
+    }
+}
+
 int main() {
     if (!glfwInit()) {
         std::cerr << "Failed to init GLFW\n";
@@ -398,6 +567,10 @@ int main() {
         glfwTerminate();
         return 1;
     }
+
+    glfwSetWindowUserPointer(window, &cap);
+    glfwSetCursorPosCallback(window, onCursorPos);
+    glfwSetMouseButtonCallback(window, onMouseButton);
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
@@ -453,7 +626,7 @@ int main() {
 
         // рисуем сферу с текстурой захваченного окна
         glBindTexture(GL_TEXTURE_2D, cap.texId);
-        drawTexturedSphere(5.0f, 64, 128);
+        drawTexturedSphere(SPHERE_RADIUS, 64, 128);
 
         glfwSwapBuffers(window);
     }
