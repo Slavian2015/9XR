@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>9XR Gyro noVNC</title>
+  <style>
+    html, body { height: 100%; margin: 0; background: #2b2b2b; }
+    body { display: flex; flex-direction: column; }
+    #bar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      padding: 8px;
+      color: #fff;
+      font: 14px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: #1e1e1e;
+    }
+    #status { flex: 1; opacity: 0.9; }
+    button {
+      appearance: none;
+      border: 0;
+      border-radius: 6px;
+      padding: 8px 10px;
+      background: #3a3a3a;
+      color: #fff;
+      font-weight: 600;
+    }
+    button:disabled { opacity: 0.5; }
+    #screen { flex: 1; overflow: hidden; }
+    #hint { color: #ddd; padding: 8px; font: 13px/1.35 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    a { color: #9ecbff; }
+  </style>
+</head>
+<body>
+  <div id="bar">
+    <div id="status">Загрузка…</div>
+    <div id="telemetry" style="opacity:.8; font:12px/1.1 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;"></div>
+    <button id="btnConnect">Connect</button>
+    <button id="btnMotion" disabled>Enable motion</button>
+    <button id="btnCal" disabled>Calibrate</button>
+  </div>
+  <div id="screen"></div>
+
+  <script type="module" crossorigin="anonymous">
+    import RFB from './core/rfb.js';
+    import KeyTable from './core/input/keysym.js';
+
+    const statusEl = document.getElementById('status');
+    const telemetryEl = document.getElementById('telemetry');
+    const btnConnect = document.getElementById('btnConnect');
+    const btnMotion = document.getElementById('btnMotion');
+    const btnCal = document.getElementById('btnCal');
+    const screenEl = document.getElementById('screen');
+
+    let rfb = null;
+    let desktopName = '';
+
+    let motionEnabled = false;
+    let hasMotion = false;
+    let sensorWarnTimer = null;
+
+    // Calibration offsets
+    let baseBeta = 0;
+    let baseGamma = 0;
+    let lastBeta = 0;
+    let lastGamma = 0;
+
+    // Rate limiting
+    let tickTimer = null;
+    let nextSendMs = 0;
+
+    // Active key hold (smooth control)
+    let activeKey = null; // { keysym, code }
+
+    function setStatus(text) {
+      statusEl.textContent = text;
+    }
+
+    function setTelemetry(text) {
+      telemetryEl.textContent = text;
+    }
+
+    function readVar(name, defVal = null) {
+      const href = '' + document.location.href + window.location.hash;
+      const re = new RegExp('.*[?&]' + name + '=([^&#]*)');
+      const m = href.match(re);
+      if (m) return decodeURIComponent(m[1]);
+      return defVal;
+    }
+
+    function buildWsUrl() {
+      const host = readVar('host', window.location.hostname);
+      let port = readVar('port', window.location.port);
+      const path = readVar('path', 'websockify');
+
+      let scheme = (window.location.protocol === 'https:') ? 'wss' : 'ws';
+      let url = scheme + '://' + host;
+      if (port) url += ':' + port;
+      url += '/' + path;
+      return url;
+    }
+
+    function connect() {
+      if (rfb) return;
+
+      setStatus('Connecting…');
+      const url = buildWsUrl();
+      const password = readVar('password');
+
+      rfb = new RFB(screenEl, url, {
+        credentials: password ? { password } : undefined,
+      });
+
+      // Ensure the remote window receives key events (GLFW requires focus).
+      const focusRemote = () => {
+        try { rfb && rfb.focus(); } catch (_) {}
+      };
+      screenEl.addEventListener('pointerdown', focusRemote, { passive: true });
+      screenEl.addEventListener('touchstart', focusRemote, { passive: true });
+      screenEl.addEventListener('mousedown', focusRemote, { passive: true });
+
+      rfb.addEventListener('connect', () => {
+        setStatus('Connected' + (desktopName ? ' to ' + desktopName : ''));
+        btnMotion.disabled = false;
+        btnCal.disabled = !motionEnabled;
+
+        // Apply scaling settings again after connection.
+        const resize = readVar('resize', 'scale');
+        rfb.scaleViewport = (resize === 'scale');
+        rfb.resizeSession = (resize === 'remote');
+
+        // Auto-focus on connect.
+        try { rfb.focus(); } catch (_) {}
+      });
+
+      rfb.addEventListener('disconnect', (e) => {
+        if (e.detail && e.detail.clean) {
+          setStatus('Disconnected');
+        } else {
+          setStatus('Disconnected (error)');
+        }
+        stopMotionLoop();
+        btnMotion.disabled = true;
+        btnCal.disabled = true;
+        setTelemetry('');
+        rfb = null;
+      });
+
+      rfb.addEventListener('credentialsrequired', () => {
+        const pwd = prompt('VNC password:');
+        if (pwd !== null && rfb) rfb.sendCredentials({ password: pwd });
+      });
+
+      rfb.addEventListener('desktopname', (e) => {
+        desktopName = (e.detail && e.detail.name) ? e.detail.name : '';
+      });
+
+      // Local scaling to fit (no numeric zoom in noVNC).
+      const resize = readVar('resize', 'scale');
+      rfb.scaleViewport = (resize === 'scale');
+      rfb.resizeSession = (resize === 'remote');
+
+      const viewOnly = readVar('view_only', 'false');
+      rfb.viewOnly = ('' + viewOnly).toLowerCase() === 'true';
+
+      btnConnect.disabled = true;
+    }
+
+    async function requestMotionPermissionIfNeeded() {
+      // iOS Safari requires explicit permission request
+      const DME = window.DeviceMotionEvent;
+      if (DME && typeof DME.requestPermission === 'function') {
+        const res = await DME.requestPermission();
+        return res === 'granted';
+      }
+      const DOE = window.DeviceOrientationEvent;
+      if (DOE && typeof DOE.requestPermission === 'function') {
+        const res = await DOE.requestPermission();
+        return res === 'granted';
+      }
+      return true;
+    }
+
+    function startMotionLoop() {
+      if (tickTimer) return;
+      nextSendMs = performance.now();
+      tickTimer = setInterval(onTick, 25);
+    }
+
+    function stopMotionLoop() {
+      if (tickTimer) {
+        clearInterval(tickTimer);
+        tickTimer = null;
+      }
+
+      // Release any held key
+      setHeldKey(null);
+
+      motionEnabled = false;
+      btnCal.disabled = true;
+      if (sensorWarnTimer) {
+        clearTimeout(sensorWarnTimer);
+        sensorWarnTimer = null;
+      }
+    }
+
+    function setHeldKey(next) {
+      if (!rfb) {
+        activeKey = null;
+        return;
+      }
+
+      // No change
+      if (activeKey && next && activeKey.code === next.code) return;
+
+      try { rfb.focus(); } catch (_) {}
+
+      // Release previous
+      if (activeKey) {
+        try { rfb.sendKey(activeKey.keysym, activeKey.code, false); } catch (_) {}
+        activeKey = null;
+      }
+
+      // Press new
+      if (next) {
+        try { rfb.sendKey(next.keysym, next.code, true); } catch (_) {}
+        activeKey = next;
+      }
+    }
+
+    // Adjusted onTick logic for 3DoF effect
+    function onTick() {
+      if (!rfb || !motionEnabled || !hasMotion) return;
+
+      const now = performance.now();
+      if (now < nextSendMs) return;
+
+      const beta = lastBeta - baseBeta;   // front/back tilt
+      const gamma = lastGamma - baseGamma; // left/right tilt
+
+      const deadZone = 6; // degrees (ignore small movements)
+      const maxTilt = 35; // maximum tilt angle
+
+      // Calculate absolute tilt values
+      const absBeta = Math.abs(beta);
+      const absGamma = Math.abs(gamma);
+
+      // Check if tilt exceeds dead zone
+      if (absBeta < deadZone && absGamma < deadZone) {
+        setHeldKey(null); // Stop movement if within dead zone
+        setTelemetry(`β ${beta.toFixed(1)}°, γ ${gamma.toFixed(1)}° · idle`);
+        nextSendMs = now + 16;
+        return;
+      }
+
+      let keysym = null;
+      let code = null;
+      let direction = '';
+      let tiltStrength = 0;
+
+      // Determine dominant tilt direction
+      if (absGamma >= absBeta) {
+        if (gamma > deadZone) {
+          keysym = KeyTable.XK_Right;
+          code = 'ArrowRight';
+          direction = '→';
+          tiltStrength = Math.min(maxTilt, absGamma);
+        } else if (gamma < -deadZone) {
+          keysym = KeyTable.XK_Left;
+          code = 'ArrowLeft';
+          direction = '←';
+          tiltStrength = Math.min(maxTilt, absGamma);
+        }
+      } else {
+        if (beta > deadZone) {
+          keysym = KeyTable.XK_Down;
+          code = 'ArrowDown';
+          direction = '↓';
+          tiltStrength = Math.min(maxTilt, absBeta);
+        } else if (beta < -deadZone) {
+          keysym = KeyTable.XK_Up;
+          code = 'ArrowUp';
+          direction = '↑';
+          tiltStrength = Math.min(maxTilt, absBeta);
+        }
+      }
+
+      if (!keysym) {
+        setHeldKey(null); // Stop movement if no valid direction
+        setTelemetry(`β ${beta.toFixed(1)}°, γ ${gamma.toFixed(1)}° · idle`);
+        nextSendMs = now + 16;
+        return;
+      }
+
+      // Adjust polling frequency based on tilt strength
+      const tiltRatio = Math.max(0, Math.min(1, (tiltStrength - deadZone) / (maxTilt - deadZone)));
+      const intervalMs = 40 - Math.round(tiltRatio * 24); // 40ms to 16ms
+
+      setHeldKey({ keysym, code });
+      setTelemetry(`β ${beta.toFixed(1)}°, γ ${gamma.toFixed(1)}° · ${direction}`);
+      nextSendMs = now + intervalMs;
+    }
+
+    // Adjusted onMotion logic to use rotationRate for VR-like control
+    function onMotion(e) {
+      // Use rotationRate for angular velocity (degrees per second)
+      const r = e.rotationRate;
+      if (!r || typeof r.alpha !== 'number' || typeof r.beta !== 'number' || typeof r.gamma !== 'number') return;
+
+      // Convert rotation rates to approximate angles over time
+      const dt = 0.025; // Assuming 25ms interval (matches onTick)
+      const rad2deg = 180 / Math.PI;
+
+      // Update angles based on rotation rate
+      lastBeta += r.beta * dt;   // front/back tilt
+      lastGamma += -r.alpha * dt; // left/right tilt
+
+      hasMotion = true;
+    }
+
+    function calibrate() {
+      baseBeta = lastBeta;
+      baseGamma = lastGamma;
+      setStatus('Calibrated' + (desktopName ? ' (' + desktopName + ')' : ''));
+    }
+
+    btnConnect.addEventListener('click', connect);
+
+    btnMotion.addEventListener('click', async () => {
+      if (!rfb) return;
+
+      // Reset sensor state for this session
+      hasMotion = false;
+      setTelemetry('');
+
+      try {
+        const ok = await requestMotionPermissionIfNeeded();
+        if (!ok) {
+          setStatus('Motion permission denied');
+          return;
+        }
+      } catch (err) {
+        setStatus('Motion permission error');
+        return;
+      }
+
+      if (!motionEnabled) {
+        window.addEventListener('devicemotion', onMotion, { passive: true });
+        motionEnabled = true;
+        btnCal.disabled = false;
+        btnMotion.textContent = 'Motion: ON';
+        startMotionLoop();
+        // Auto-calibrate on enable
+        calibrate();
+
+        // Warn if browser blocks sensor events (common on some Android builds/settings)
+        sensorWarnTimer = setTimeout(() => {
+          if (!hasMotion) {
+            if (!window.isSecureContext) {
+              setStatus('No sensor data (HTTP blocked)');
+              setTelemetry('Fix: use HTTPS, or Chrome flag “Insecure origins treated as secure”');
+              return;
+            }
+            setStatus('No sensor data (check motion permissions)');
+            setTelemetry('Chrome: Site settings → Motion sensors (allow)');
+          }
+        }, 1500);
+      } else {
+        window.removeEventListener('devicemotion', onMotion);
+        btnMotion.textContent = 'Enable motion';
+        stopMotionLoop();
+        setStatus('Motion disabled' + (desktopName ? ' (' + desktopName + ')' : ''));
+      }
+    });
+
+    // Safety: release any held key when tab is hidden or page loses focus
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) setHeldKey(null);
+    });
+    window.addEventListener('blur', () => setHeldKey(null));
+
+    btnCal.addEventListener('click', calibrate);
+
+    // Optional autoconnect
+    const autoconnect = ('' + readVar('autoconnect', 'false')).toLowerCase() === 'true';
+    if (autoconnect) {
+      connect();
+    } else {
+      setStatus('Ready (press Connect)');
+    }
+  </script>
+</body>
+</html>

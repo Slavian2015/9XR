@@ -10,6 +10,16 @@ docker compose up -d --build
 
 Открыть: `http://127.0.0.1:6080/vnc.html`
 
+Автоподключение + Local Scaling (подгоняет картинку под экран):
+
+`http://192.168.31.100:6080/vnc.html?autoconnect=true&resize=scale`
+
+Управление наклоном телефона (акселерометр/гироскоп → стрелки в `spherical_monitor`):
+
+`http://192.168.31.100:6080/gyro.html?autoconnect=true&resize=scale`
+
+Примечание: на iOS датчики часто работают только по HTTPS и после нажатия кнопки `Enable motion`.
+
 ## Переменные окружения
 
 - `VIRT_W`, `VIRT_H` — размер виртуального экрана Xvfb (по умолчанию 5120x1440)

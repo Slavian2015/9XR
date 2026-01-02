@@ -17,7 +17,7 @@
 float g_yawDeg   = 0.0f;   // вращение вокруг Y
 float g_pitchDeg = 0.0f;   // вращение вокруг X
 
-const float ROT_SPEED = 2.0f;   // скорость поворота стрелками
+const float ROT_SPEED = 3.0f;   // скорость поворота стрелками
 
 // Sphere radius used both for rendering and mouse-ray mapping.
 static constexpr float SPHERE_RADIUS = 5.0f;

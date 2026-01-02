@@ -35,6 +35,9 @@ RUN g++ spherical_monitor.cpp -o spherical_monitor \
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+# Custom noVNC entry page with phone motion control
+COPY web/gyro.html /usr/share/novnc/gyro.html
+
 EXPOSE 6080
 
 ENTRYPOINT ["/usr/bin/tini","--","/entrypoint.sh"]
