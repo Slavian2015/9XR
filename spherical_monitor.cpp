@@ -22,6 +22,47 @@ const float ROT_SPEED = 3.0f;   // скорость поворота стрел�
 // Sphere radius used both for rendering and mouse-ray mapping.
 static constexpr float SPHERE_RADIUS = 5.0f;
 
+enum class ProjectionMode {
+    Sphere,
+    SphereClamp,
+    Cylinder
+};
+
+static ProjectionMode g_projectionMode = ProjectionMode::Sphere;
+
+static ProjectionMode parseProjectionModeFromEnv() {
+    const char* v = std::getenv("PROJECTION_MODE");
+    if (!v || std::strlen(v) == 0) return ProjectionMode::Sphere;
+    if (std::strcmp(v, "sphere") == 0) return ProjectionMode::Sphere;
+    if (std::strcmp(v, "sphere_clamp") == 0) return ProjectionMode::SphereClamp;
+    if (std::strcmp(v, "cylinder") == 0) return ProjectionMode::Cylinder;
+    std::cerr << "Unknown PROJECTION_MODE='" << v << "', using 'sphere'\n";
+    return ProjectionMode::Sphere;
+}
+
+static const char* projectionModeName(ProjectionMode m) {
+    switch (m) {
+        case ProjectionMode::Sphere: return "sphere";
+        case ProjectionMode::SphereClamp: return "sphere_clamp";
+        case ProjectionMode::Cylinder: return "cylinder";
+        default: return "sphere";
+    }
+}
+
+static float sphereClampThetaMaxRad() {
+    // Default: 80 degrees (removes polar singularity artifacts while keeping most of the sphere).
+    float deg = 80.0f;
+    if (const char* s = std::getenv("SPHERE_THETA_MAX_DEG")) {
+        if (std::strlen(s) > 0) {
+            deg = static_cast<float>(std::atof(s));
+        }
+    }
+    // Keep within a sane range.
+    if (deg < 1.0f) deg = 1.0f;
+    if (deg > 89.9f) deg = 89.9f;
+    return deg * 3.14159265358979323846f / 180.0f;
+}
+
 static bool isSphereMouseEnabled() {
     const char* v = std::getenv("SPHERE_MOUSE");
     if (!v || std::strlen(v) == 0) return true;
@@ -365,17 +406,47 @@ static bool viewMouseToCaptureXY(GLFWwindow* glfwWindow, const WindowCapture& ca
     Vec3 dirWorld = rotateY(rotateX(dirCam, g_pitchDeg), g_yawDeg);
     dirWorld = normalize(dirWorld);
 
-    // Convert direction to spherical UV used by drawTexturedSphere().
-    float y = std::clamp(dirWorld.y, -1.0f, 1.0f);
-    float theta = std::asin(y); // [-pi/2, pi/2]
+    float u = 0.0f;
+    float v = 0.0f;
+    const float PI = 3.14159265358979323846f;
 
-    float phi = std::atan2(dirWorld.z, dirWorld.x); // [-pi, pi]
-    if (phi < 0.0f) {
-        phi += 2.0f * 3.14159265358979323846f;
+    if (g_projectionMode == ProjectionMode::Cylinder) {
+        // Intersect ray with an infinite cylinder x^2+z^2=R^2 (camera at origin).
+        float dxz = std::sqrt(dirWorld.x * dirWorld.x + dirWorld.z * dirWorld.z);
+        if (dxz < 1e-6f) return false;
+        float t = SPHERE_RADIUS / dxz;
+        float px = dirWorld.x * t;
+        float py = dirWorld.y * t;
+        float pz = dirWorld.z * t;
+
+        float phi = std::atan2(pz, px); // [-pi, pi]
+        if (phi < 0.0f) phi += 2.0f * PI;
+        u = phi / (2.0f * PI);
+
+        // Map cylinder height linearly to the same theta range as the sphere's equirectangular V.
+        // y = R * theta, theta in [-pi/2, pi/2]
+        float theta = py / SPHERE_RADIUS;
+        if (theta < -PI / 2.0f || theta > PI / 2.0f) {
+            return false;
+        }
+        v = 1.0f - ((theta + PI / 2.0f) / PI);
+    } else {
+        // Sphere / sphere_clamp mapping.
+        float y = std::clamp(dirWorld.y, -1.0f, 1.0f);
+        float theta = std::asin(y); // [-pi/2, pi/2]
+
+        float phi = std::atan2(dirWorld.z, dirWorld.x); // [-pi, pi]
+        if (phi < 0.0f) phi += 2.0f * PI;
+        u = phi / (2.0f * PI);
+
+        if (g_projectionMode == ProjectionMode::SphereClamp) {
+            float tmax = sphereClampThetaMaxRad();
+            if (theta < -tmax || theta > tmax) return false;
+            v = 1.0f - ((theta + tmax) / (2.0f * tmax));
+        } else {
+            v = 1.0f - ((theta + PI / 2.0f) / PI);
+        }
     }
-
-    float u = phi / (2.0f * 3.14159265358979323846f); // [0,1)
-    float v = 1.0f - ((theta + 3.14159265358979323846f / 2.0f) / 3.14159265358979323846f);
 
     int cx = static_cast<int>(u * static_cast<float>(cap.width));
     int cy = static_cast<int>(v * static_cast<float>(cap.height));
@@ -487,6 +558,77 @@ void drawTexturedSphere(float radius, int rings, int sectors) {
     }
 }
 
+void drawTexturedSphereClamped(float radius, float thetaMaxRad, int rings, int sectors) {
+    const float PI = 3.14159265358979323846f;
+    thetaMaxRad = std::clamp(thetaMaxRad, 0.01f, (PI / 2.0f) - 0.001f);
+
+    for (int r = 0; r < rings; ++r) {
+        float v1 = (float)r / (float)rings;
+        float v2 = (float)(r + 1) / (float)rings;
+
+        float theta1 = -thetaMaxRad + v1 * (2.0f * thetaMaxRad);
+        float theta2 = -thetaMaxRad + v2 * (2.0f * thetaMaxRad);
+
+        glBegin(GL_QUAD_STRIP);
+        for (int s = 0; s <= sectors; ++s) {
+            float u = (float)s / (float)sectors;
+            float phi = u * 2.0f * PI;
+
+            float x1 = radius * std::cos(theta1) * std::cos(phi);
+            float y1 = radius * std::sin(theta1);
+            float z1 = radius * std::cos(theta1) * std::sin(phi);
+
+            float x2 = radius * std::cos(theta2) * std::cos(phi);
+            float y2 = radius * std::sin(theta2);
+            float z2 = radius * std::cos(theta2) * std::sin(phi);
+
+            float u1 = phi / (2.0f * PI);
+            float v1_tex = 1.0f - ((theta1 + thetaMaxRad) / (2.0f * thetaMaxRad));
+            float u2 = phi / (2.0f * PI);
+            float v2_tex = 1.0f - ((theta2 + thetaMaxRad) / (2.0f * thetaMaxRad));
+
+            glTexCoord2f(u1, v1_tex);
+            glVertex3f(x1, y1, z1);
+
+            glTexCoord2f(u2, v2_tex);
+            glVertex3f(x2, y2, z2);
+        }
+        glEnd();
+    }
+}
+
+void drawTexturedCylinder(float radius, int rings, int sectors) {
+    const float PI = 3.14159265358979323846f;
+
+    // Match sphere equirectangular V range: theta in [-pi/2, pi/2] and y = R * theta.
+    float yMin = -radius * (PI / 2.0f);
+    float yMax =  radius * (PI / 2.0f);
+
+    for (int r = 0; r < rings; ++r) {
+        float v1 = (float)r / (float)rings;
+        float v2 = (float)(r + 1) / (float)rings;
+
+        float y1 = yMax + (yMin - yMax) * v1; // top -> bottom
+        float y2 = yMax + (yMin - yMax) * v2;
+
+        glBegin(GL_QUAD_STRIP);
+        for (int s = 0; s <= sectors; ++s) {
+            float u = (float)s / (float)sectors;
+            float phi = u * 2.0f * PI;
+
+            float x = radius * std::cos(phi);
+            float z = radius * std::sin(phi);
+
+            glTexCoord2f(u, v1);
+            glVertex3f(x, y1, z);
+
+            glTexCoord2f(u, v2);
+            glVertex3f(x, y2, z);
+        }
+        glEnd();
+    }
+}
+
 static double g_lastCursorX = 0.0;
 static double g_lastCursorY = 0.0;
 static bool g_leftMouseDown = false;
@@ -545,6 +687,13 @@ int main() {
         return 1;
     }
 
+    g_projectionMode = parseProjectionModeFromEnv();
+    std::cerr << "Projection mode: " << projectionModeName(g_projectionMode);
+    if (g_projectionMode == ProjectionMode::SphereClamp) {
+        std::cerr << " (SPHERE_THETA_MAX_DEG=" << (sphereClampThetaMaxRad() * 180.0f / 3.14159265358979323846f) << ")";
+    }
+    std::cerr << "\n";
+
     GLFWwindow* window = glfwCreateWindow(1280, 720,
                                           "Spherical Monitor (Window Capture)",
                                           nullptr, nullptr);
@@ -599,6 +748,25 @@ int main() {
         }
         spaceWasDown = spaceDown;
 
+        // P — cycle projection modes at runtime.
+        static bool pWasDown = false;
+        bool pDown = (glfwGetKey(window, GLFW_KEY_P) == GLFW_PRESS);
+        if (pDown && !pWasDown) {
+            if (g_projectionMode == ProjectionMode::Sphere) {
+                g_projectionMode = ProjectionMode::SphereClamp;
+            } else if (g_projectionMode == ProjectionMode::SphereClamp) {
+                g_projectionMode = ProjectionMode::Cylinder;
+            } else {
+                g_projectionMode = ProjectionMode::Sphere;
+            }
+            std::cerr << "Projection mode switched to: " << projectionModeName(g_projectionMode);
+            if (g_projectionMode == ProjectionMode::SphereClamp) {
+                std::cerr << " (SPHERE_THETA_MAX_DEG=" << (sphereClampThetaMaxRad() * 180.0f / 3.14159265358979323846f) << ")";
+            }
+            std::cerr << "\n";
+        }
+        pWasDown = pDown;
+
         // обновляем текстуру окна
         cap.updateTexture();
 
@@ -626,7 +794,13 @@ int main() {
 
         // рисуем сферу с текстурой захваченного окна
         glBindTexture(GL_TEXTURE_2D, cap.texId);
-        drawTexturedSphere(SPHERE_RADIUS, 64, 128);
+        if (g_projectionMode == ProjectionMode::Cylinder) {
+            drawTexturedCylinder(SPHERE_RADIUS, 64, 128);
+        } else if (g_projectionMode == ProjectionMode::SphereClamp) {
+            drawTexturedSphereClamped(SPHERE_RADIUS, sphereClampThetaMaxRad(), 64, 128);
+        } else {
+            drawTexturedSphere(SPHERE_RADIUS, 64, 128);
+        }
 
         glfwSwapBuffers(window);
     }
