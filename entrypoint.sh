@@ -2,7 +2,7 @@
 set -euo pipefail
 
 VIRT_W=${VIRT_W:-5120}
-VIRT_H=${VIRT_H:-1440}
+VIRT_H=${VIRT_H:-2880}
 DISPLAY_NUM=${DISPLAY_NUM:-:0}
 
 # Two-display mode:

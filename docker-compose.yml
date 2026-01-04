@@ -6,7 +6,7 @@ services:
     container_name: spherical-monitor
     environment:
       - VIRT_W=5120
-      - VIRT_H=1440
+      - VIRT_H=2880
       # Two Xvfb displays:
       # - SOURCE (:0 by default) is the big desktop where apps run
       # - VIEW (:1 by default) is the small desktop shown via noVNC

@@ -5,7 +5,7 @@ Docker-контейнер поднимает два виртуальных X11-�
 ## Запуск
 
 ```bash
-docker compose up -d --build
+    docker-compose up -d --build
 ```
 
 Открыть: `http://127.0.0.1:6080/vnc.html`
