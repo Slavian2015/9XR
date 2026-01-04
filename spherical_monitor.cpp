@@ -17,6 +17,9 @@
 float g_yawDeg   = 0.0f;   // вращение вокруг Y
 float g_pitchDeg = 0.0f;   // вращение вокруг X
 
+// Camera FOV (zoom). Smaller = closer, bigger = wider.
+float g_fovYDeg  = 90.0f;
+
 const float ROT_SPEED = 3.0f;   // скорость поворота стрелками
 
 // Sphere radius used both for rendering and mouse-ray mapping.
@@ -25,10 +28,14 @@ static constexpr float SPHERE_RADIUS = 5.0f;
 enum class ProjectionMode {
     Sphere,
     SphereClamp,
-    Cylinder
+    Cylinder,
+    Morph
 };
 
 static ProjectionMode g_projectionMode = ProjectionMode::Sphere;
+
+// 0 = cylinder-like (less polar distortion), 1 = sphere-like.
+static float g_sphericity = 1.0f;
 
 static ProjectionMode parseProjectionModeFromEnv() {
     const char* v = std::getenv("PROJECTION_MODE");
@@ -36,6 +43,7 @@ static ProjectionMode parseProjectionModeFromEnv() {
     if (std::strcmp(v, "sphere") == 0) return ProjectionMode::Sphere;
     if (std::strcmp(v, "sphere_clamp") == 0) return ProjectionMode::SphereClamp;
     if (std::strcmp(v, "cylinder") == 0) return ProjectionMode::Cylinder;
+    if (std::strcmp(v, "morph") == 0) return ProjectionMode::Morph;
     std::cerr << "Unknown PROJECTION_MODE='" << v << "', using 'sphere'\n";
     return ProjectionMode::Sphere;
 }
@@ -45,8 +53,88 @@ static const char* projectionModeName(ProjectionMode m) {
         case ProjectionMode::Sphere: return "sphere";
         case ProjectionMode::SphereClamp: return "sphere_clamp";
         case ProjectionMode::Cylinder: return "cylinder";
+        case ProjectionMode::Morph: return "morph";
         default: return "sphere";
     }
+}
+
+static float parseSphericityFromEnv() {
+    float s = 1.0f;
+    if (const char* v = std::getenv("SPHERICITY")) {
+        if (std::strlen(v) > 0) s = static_cast<float>(std::atof(v));
+    }
+    if (s < 0.0f) s = 0.0f;
+    if (s > 1.0f) s = 1.0f;
+    return s;
+}
+
+static float clamp01(float x) {
+    return std::clamp(x, 0.0f, 1.0f);
+}
+
+struct Vec3 {
+    float x;
+    float y;
+    float z;
+};
+
+static bool dirToUV_Morph(Vec3 dirWorld, float sphericity, float& outU, float& outV) {
+    // Surface is a rotationally-symmetric morph between a cylinder and a sphere:
+    //   r(theta) = (1-s) * 1 + s * cos(theta)
+    //   y(theta) = (1-s) * theta + s * sin(theta)
+    // where theta in [-pi/2, pi/2], and final position is scaled by SPHERE_RADIUS.
+    // We solve for theta by intersecting the view ray with this surface in the (r,y) plane.
+
+    const float PI = 3.14159265358979323846f;
+    sphericity = clamp01(sphericity);
+
+    float dxz = std::sqrt(dirWorld.x * dirWorld.x + dirWorld.z * dirWorld.z);
+    if (dxz < 1e-6f) return false;
+
+    float phi = std::atan2(dirWorld.z, dirWorld.x);
+    if (phi < 0.0f) phi += 2.0f * PI;
+    outU = phi / (2.0f * PI);
+
+    auto f = [&](float theta) -> float {
+        float r = (1.0f - sphericity) * 1.0f + sphericity * std::cos(theta);
+        float y = (1.0f - sphericity) * theta + sphericity * std::sin(theta);
+        // Equation: dy * r(theta) = dxz * y(theta)
+        return dirWorld.y * r - dxz * y;
+    };
+
+    // Avoid exact poles where cos(theta)=0.
+    float lo = -PI / 2.0f + 1e-4f;
+    float hi =  PI / 2.0f - 1e-4f;
+    float flo = f(lo);
+    float fhi = f(hi);
+    if (flo == 0.0f) {
+        outV = 1.0f - ((lo + PI / 2.0f) / PI);
+        return true;
+    }
+    if (fhi == 0.0f) {
+        outV = 1.0f - ((hi + PI / 2.0f) / PI);
+        return true;
+    }
+    if ((flo > 0.0f && fhi > 0.0f) || (flo < 0.0f && fhi < 0.0f)) {
+        return false;
+    }
+
+    // Bisection.
+    for (int i = 0; i < 40; ++i) {
+        float mid = 0.5f * (lo + hi);
+        float fmid = f(mid);
+        if ((flo > 0.0f && fmid > 0.0f) || (flo < 0.0f && fmid < 0.0f)) {
+            lo = mid;
+            flo = fmid;
+        } else {
+            hi = mid;
+            fhi = fmid;
+        }
+    }
+
+    float theta = 0.5f * (lo + hi);
+    outV = 1.0f - ((theta + PI / 2.0f) / PI);
+    return true;
 }
 
 static float sphereClampThetaMaxRad() {
@@ -70,12 +158,6 @@ static bool isSphereMouseEnabled() {
 }
 
 struct WindowCapture;
-
-struct Vec3 {
-    float x;
-    float y;
-    float z;
-};
 
 static Vec3 normalize(Vec3 v) {
     float len = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
@@ -399,7 +481,7 @@ static bool viewMouseToCaptureXY(GLFWwindow* glfwWindow, const WindowCapture& ca
 
     // Reconstruct a view ray in camera space for the same projection used in rendering.
     float aspect = static_cast<float>(fbW) / static_cast<float>(fbH);
-    float tanHalfFovY = std::tan(90.0f * 0.5f * 3.14159265358979323846f / 180.0f);
+    float tanHalfFovY = std::tan(g_fovYDeg * 0.5f * 3.14159265358979323846f / 180.0f);
     Vec3 dirCam = normalize({ndcX * tanHalfFovY * aspect, ndcY * tanHalfFovY, -1.0f});
 
     // Convert camera-space ray to world-space direction in the sphere's model coordinates.
@@ -410,7 +492,9 @@ static bool viewMouseToCaptureXY(GLFWwindow* glfwWindow, const WindowCapture& ca
     float v = 0.0f;
     const float PI = 3.14159265358979323846f;
 
-    if (g_projectionMode == ProjectionMode::Cylinder) {
+    if (g_projectionMode == ProjectionMode::Morph) {
+        if (!dirToUV_Morph(dirWorld, g_sphericity, u, v)) return false;
+    } else if (g_projectionMode == ProjectionMode::Cylinder) {
         // Intersect ray with an infinite cylinder x^2+z^2=R^2 (camera at origin).
         float dxz = std::sqrt(dirWorld.x * dirWorld.x + dirWorld.z * dirWorld.z);
         if (dxz < 1e-6f) return false;
@@ -629,6 +713,60 @@ void drawTexturedCylinder(float radius, int rings, int sectors) {
     }
 }
 
+void drawTexturedMorph(float radius, float sphericity, int rings, int sectors) {
+    const float PI = 3.14159265358979323846f;
+    sphericity = clamp01(sphericity);
+
+    for (int r = 0; r < rings; ++r) {
+        float v1 = (float)r / (float)rings;
+        float v2 = (float)(r + 1) / (float)rings;
+
+        float theta1 = v1 * PI - PI / 2.0f;
+        float theta2 = v2 * PI - PI / 2.0f;
+
+        glBegin(GL_QUAD_STRIP);
+        for (int s = 0; s <= sectors; ++s) {
+            float u = (float)s / (float)sectors;
+            float phi = u * 2.0f * PI;
+
+            // Sphere positions.
+            float sx1 = radius * std::cos(theta1) * std::cos(phi);
+            float sy1 = radius * std::sin(theta1);
+            float sz1 = radius * std::cos(theta1) * std::sin(phi);
+            float sx2 = radius * std::cos(theta2) * std::cos(phi);
+            float sy2 = radius * std::sin(theta2);
+            float sz2 = radius * std::cos(theta2) * std::sin(phi);
+
+            // Cylinder positions (same phi, theta range mapped to y).
+            float cx = radius * std::cos(phi);
+            float cz = radius * std::sin(phi);
+            float cy1 = radius * theta1;
+            float cy2 = radius * theta2;
+
+            // Morph between cylinder and sphere.
+            float x1 = (1.0f - sphericity) * cx + sphericity * sx1;
+            float y1 = (1.0f - sphericity) * cy1 + sphericity * sy1;
+            float z1 = (1.0f - sphericity) * cz + sphericity * sz1;
+            float x2 = (1.0f - sphericity) * cx + sphericity * sx2;
+            float y2 = (1.0f - sphericity) * cy2 + sphericity * sy2;
+            float z2 = (1.0f - sphericity) * cz + sphericity * sz2;
+
+            // Keep the same equirectangular UV mapping as the full sphere.
+            float u1 = phi / (2.0f * PI);
+            float v1_tex = 1.0f - ((theta1 + PI/2.0f) / PI);
+            float u2 = phi / (2.0f * PI);
+            float v2_tex = 1.0f - ((theta2 + PI/2.0f) / PI);
+
+            glTexCoord2f(u1, v1_tex);
+            glVertex3f(x1, y1, z1);
+
+            glTexCoord2f(u2, v2_tex);
+            glVertex3f(x2, y2, z2);
+        }
+        glEnd();
+    }
+}
+
 static double g_lastCursorX = 0.0;
 static double g_lastCursorY = 0.0;
 static bool g_leftMouseDown = false;
@@ -688,9 +826,13 @@ int main() {
     }
 
     g_projectionMode = parseProjectionModeFromEnv();
+    g_sphericity = parseSphericityFromEnv();
     std::cerr << "Projection mode: " << projectionModeName(g_projectionMode);
     if (g_projectionMode == ProjectionMode::SphereClamp) {
         std::cerr << " (SPHERE_THETA_MAX_DEG=" << (sphereClampThetaMaxRad() * 180.0f / 3.14159265358979323846f) << ")";
+    }
+    if (g_projectionMode == ProjectionMode::Morph) {
+        std::cerr << " (SPHERICITY=" << g_sphericity << ")";
     }
     std::cerr << "\n";
 
@@ -748,6 +890,42 @@ int main() {
         }
         spaceWasDown = spaceDown;
 
+        // W/S — adjust sphericity (more/less spherical). Switches to morph mode.
+        static bool wWasDown = false;
+        static bool sWasDown = false;
+        bool wDown = (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS);
+        bool sDown = (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS);
+        if (wDown && !wWasDown) {
+            g_projectionMode = ProjectionMode::Morph;
+            g_sphericity = clamp01(g_sphericity + 0.1f);
+            std::cerr << "Morph sphericity: " << g_sphericity << "\n";
+        }
+        if (sDown && !sWasDown) {
+            g_projectionMode = ProjectionMode::Morph;
+            g_sphericity = clamp01(g_sphericity - 0.1f);
+            std::cerr << "Morph sphericity: " << g_sphericity << "\n";
+        }
+        wWasDown = wDown;
+        sWasDown = sDown;
+
+        // Q/E — zoom in/out (changes FOV).
+        static bool qWasDown = false;
+        static bool eWasDown = false;
+        bool qDown = (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS);
+        bool eDown = (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS);
+        if (qDown && !qWasDown) {
+            g_fovYDeg -= 5.0f;
+            if (g_fovYDeg < 30.0f) g_fovYDeg = 30.0f;
+            std::cerr << "FOV: " << g_fovYDeg << "\n";
+        }
+        if (eDown && !eWasDown) {
+            g_fovYDeg += 5.0f;
+            if (g_fovYDeg > 120.0f) g_fovYDeg = 120.0f;
+            std::cerr << "FOV: " << g_fovYDeg << "\n";
+        }
+        qWasDown = qDown;
+        eWasDown = eDown;
+
         // P — cycle projection modes at runtime.
         static bool pWasDown = false;
         bool pDown = (glfwGetKey(window, GLFW_KEY_P) == GLFW_PRESS);
@@ -756,12 +934,17 @@ int main() {
                 g_projectionMode = ProjectionMode::SphereClamp;
             } else if (g_projectionMode == ProjectionMode::SphereClamp) {
                 g_projectionMode = ProjectionMode::Cylinder;
+            } else if (g_projectionMode == ProjectionMode::Cylinder) {
+                g_projectionMode = ProjectionMode::Morph;
             } else {
                 g_projectionMode = ProjectionMode::Sphere;
             }
             std::cerr << "Projection mode switched to: " << projectionModeName(g_projectionMode);
             if (g_projectionMode == ProjectionMode::SphereClamp) {
                 std::cerr << " (SPHERE_THETA_MAX_DEG=" << (sphereClampThetaMaxRad() * 180.0f / 3.14159265358979323846f) << ")";
+            }
+            if (g_projectionMode == ProjectionMode::Morph) {
+                std::cerr << " (SPHERICITY=" << g_sphericity << ")";
             }
             std::cerr << "\n";
         }
@@ -781,7 +964,7 @@ int main() {
         glMatrixMode(GL_PROJECTION);
         glLoadIdentity();
         float aspect = (float)winW / (float)winH;
-        float fovY = 90.0f;
+        float fovY = g_fovYDeg;
         float fH = std::tan(fovY / 360.0f * 3.14159265f) * 0.1f;
         float fW = fH * aspect;
         glFrustum(-fW, fW, -fH, fH, 0.1f, 100.0f);
@@ -794,7 +977,9 @@ int main() {
 
         // рисуем сферу с текстурой захваченного окна
         glBindTexture(GL_TEXTURE_2D, cap.texId);
-        if (g_projectionMode == ProjectionMode::Cylinder) {
+        if (g_projectionMode == ProjectionMode::Morph) {
+            drawTexturedMorph(SPHERE_RADIUS, g_sphericity, 64, 128);
+        } else if (g_projectionMode == ProjectionMode::Cylinder) {
             drawTexturedCylinder(SPHERE_RADIUS, 64, 128);
         } else if (g_projectionMode == ProjectionMode::SphereClamp) {
             drawTexturedSphereClamped(SPHERE_RADIUS, sphereClampThetaMaxRad(), 64, 128);
